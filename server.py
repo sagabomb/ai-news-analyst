@@ -1,43 +1,32 @@
-from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI
+from pydantic import BaseModel
 
-# 1. Create the Server
-# We name it "News Analyst"
-mcp = FastMCP("News Analyst")
+# 1. Create the App
+# Note: The variable is named 'app', not 'mcp'
+app = FastAPI()
 
-# 2. Define the Logic
-# We move your "main" function here, but we add a "decorator" (@mcp.tool)
-# This tells the MCP system: "Hey, this function is a Tool other AIs can use!"
-@mcp.tool()
-def analyze_hype(news_input: str) -> dict:
-    """
-    Analyzes text to calculate a hype score (0-100).
-    Input: A string of news text.
-    Output: A dictionary with score and keywords.
-    """
-    # SAFETY CHECK: Handle empty input
-    if not news_input:
-        return {"hype_score": 0, "reason": "No input provided"}
+# 2. Define the Input Format
+# We tell the server to expect a JSON like {"text": "some news"}
+class Input(BaseModel):
+    text: str
 
+# 3. Define the Route
+# This creates a web link at http://.../analyze
+@app.post("/analyze")
+def analyze_hype(data: Input):
     # LOGIC (Same as before)
     hype_words = ["revolutionary", "breakthrough", "agentic", "transform", "incredible", "boom", "future"]
     
     score = 0
-    found_words = []
-    text_lower = str(news_input).lower()
+    text_lower = data.text.lower()
     
     for word in hype_words:
         if word in text_lower:
             score += 10
-            found_words.append(word)
-    
+            
     final_score = min(score, 100)
     
     return {
         "hype_score": final_score,
-        "keywords_found": found_words
+        "status": "Processed by Local FastAPI"
     }
-
-# 3. Run the Server
-if __name__ == "__main__":
-    # This command starts the server so it listens for requests
-    mcp.run()
