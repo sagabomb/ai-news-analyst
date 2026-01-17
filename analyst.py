@@ -1,33 +1,30 @@
 import json
 
 def main(news_input: str) -> dict:
+    # SAFETY CHECK: If input is empty/None, return 0 immediately
+    if not news_input:
+        return {"hype_score": 0}
+
     # 1. Define Hype Keywords
     hype_words = ["revolutionary", "breakthrough", "agentic", "transform", "incredible", "boom", "future"]
     
     # 2. Calculate Score
     score = 0
-    found_words = []
+    # Force input to string just in case
+    text_lower = str(news_input).lower()
     
-    # +10 points for every hype word found
-    text_lower = news_input.lower()
     for word in hype_words:
         if word in text_lower:
             score += 10
-            found_words.append(word)
     
     # 3. Cap score at 100
     final_score = min(score, 100)
     
-    # 4. Return JSON structure
-    result = {
-        "hype_score": final_score,
-        "keywords_found": found_words,
-        "analysis": f"Score: {final_score}/100. Keywords: {', '.join(found_words)}"
+    # 4. Return result
+    return {
+        "hype_score": final_score
     }
-    
-    return result
 
-# Simple test block (Runs only on your Mac, not in Dify)
+# Test block
 if __name__ == "__main__":
-    sample_text = "This new agentic AI is a revolutionary breakthrough for the future."
-    print(json.dumps(main(sample_text), indent=2))
+    print(json.dumps(main("This is a revolutionary agentic boom"), indent=2))
