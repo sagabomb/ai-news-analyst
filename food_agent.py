@@ -1,6 +1,6 @@
 import os
-import csv
-from typing import Literal
+import sqlite3
+from typing import Literal, List, Dict
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from tavily import TavilyClient
@@ -12,88 +12,97 @@ env_path = os.path.join(current_dir, '.env')
 load_dotenv(env_path)
 API_KEY = os.getenv("TAVILY_API_KEY")
 
+# DATABASE SETUP
+# This creates a file 'foodie_memory.db' in your folder.
+DB_PATH = os.path.join(current_dir, "foodie_memory.db")
+
+def init_db():
+    """Creates the table if it doesn't exist."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS restaurants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            neighborhood TEXT,
+            taste_rating INTEGER,
+            notes TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Initialize DB on startup
+init_db()
+
 mcp = FastMCP("Markham Foodie Agent")
 
-# 2. THE NEW "STRICT" DATA STRUCTURE
-# This solves the "Priorities" and "Distance" issues by capturing granular data.
+# 2. DATA STRUCTURE
 class RestaurantReview(BaseModel):
     name: str = Field(description="Name of the restaurant")
-    neighborhood: str = Field(description="The specific area (e.g., 'Unionville', 'First Markham Place', 'Steeles/Woodbine')")
-    address: str = Field(description="The street address (for proximity checks)")
-    
-    # We split the scores so you can filter by what matters
-    taste_rating: int = Field(description="1-10 rating purely on flavor quality")
-    authenticity_rating: int = Field(description="1-10 rating on traditional preparation (non-westernized)")
-    value_rating: int = Field(description="1-10 rating on price-to-portion ratio")
-    
-    price_estimate: float = Field(description="Estimated price per person in CAD (number only)")
-    best_dish: str = Field(description="The specific dish to order here")
+    neighborhood: str = Field(description="The specific area")
+    taste_rating: int = Field(description="1-10 rating on flavor")
+    notes: str = Field(description="Short summary of why it's good or bad")
 
-# --- TOOL 1: THE SMART SCOUT ---
+# --- TOOL 1: THE MEMORY CHECK ---
 @mcp.tool()
-def search_food_reviews(dish: str, location: str, source_type: Literal["social", "general"] = "social") -> str:
+def check_my_food_history() -> str:
     """
-    Searches for restaurant reviews.
-    - Adds 'negative keywords' to ban generic SEO sites.
-    - Looks for 'neighbors' of the location automatically.
+    Checks the local database to see what restaurants the user has already tracked.
+    Use this BEFORE searching to avoid repeating suggestions.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT name, taste_rating, notes FROM restaurants')
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return "Memory is empty. No past restaurants found."
+    
+    history = "Here are the places we already know about:\n"
+    for row in rows:
+        history += f"- {row[0]}: Rated {row[1]}/10. Notes: {row[2]}\n"
+    return history
+
+# --- TOOL 2: THE SCOUT (Web Search) ---
+@mcp.tool()
+def search_new_spots(dish: str, location: str) -> str:
+    """
+    Searches for NEW spots. 
+    Use 'check_my_food_history' first to know what to ignore.
     """
     if not API_KEY: return "Error: API Key missing."
     client = TavilyClient(api_key=API_KEY)
 
-    # 1. Negative Prompting (The "Quality" Fix)
-    # We explicitly tell the search engine to ignore generic aggregators
-    exclusions = "-site:yelp.ca -site:tripadvisor.ca -site:narcity.com -site:blogto.com"
-    
-    if source_type == "social":
-        # Look for passionate arguments on Reddit/Chowhound
-        query = f"best authentic {dish} near {location} reddit forum discussion {exclusions}"
-    else:
-        # Look for deep-dive food blogs or articles
-        query = f"best {dish} in {location} review hidden gem {exclusions}"
-
-    response = client.search(query, topic="general", max_results=7)
+    # Negative prompting to avoid generic lists
+    query = f"best authentic {dish} in {location} reddit forum discussion -site:yelp.ca -site:tripadvisor.ca"
+    response = client.search(query, max_results=5)
     
     results = []
-    for result in response['results']:
-        results.append(f"Source: {result['title']}\nLink: {result['url']}\nSnippet: {result['content']}\n---")
+    for r in response['results']:
+        results.append(f"Found: {r['title']}\nSnippet: {r['content']}\n---")
     return "\n".join(results)
 
-# --- TOOL 2: THE ANALYST (Saver) ---
+# --- TOOL 3: THE MEMORY WRITER ---
 @mcp.tool()
-def save_structured_review(review: RestaurantReview) -> str:
+def remember_restaurant(review: RestaurantReview) -> str:
     """
-    Saves the restaurant data to CSV.
-    Only call this if the restaurant is in the target city OR immediate neighboring areas.
+    Saves a restaurant to the permanent database.
+    Use this when you find a high-quality candidate worth remembering.
     """
-    desktop = os.path.expanduser("~/Desktop")
-    file_path = os.path.join(desktop, "restaurant_data.csv")
-    file_exists = os.path.exists(file_path)
-    
     try:
-        with open(file_path, mode='a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            # Write Header with new columns
-            if not file_exists:
-                writer.writerow([
-                    "Name", "Neighborhood", "Address", 
-                    "Taste (/10)", "Authenticity (/10)", "Value (/10)", 
-                    "Price ($)", "Must Order"
-                ])
-            
-            # Write Data
-            writer.writerow([
-                review.name, 
-                review.neighborhood,
-                review.address,
-                review.taste_rating,
-                review.authenticity_rating,
-                review.value_rating,
-                review.price_estimate, 
-                review.best_dish
-            ])
-        return f"Saved {review.name} ({review.neighborhood}) to CSV."
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO restaurants (name, neighborhood, taste_rating, notes)
+            VALUES (?, ?, ?, ?)
+        ''', (review.name, review.neighborhood, review.taste_rating, review.notes))
+        conn.commit()
+        conn.close()
+        return f"SUCCESS: I have memorized {review.name}."
     except Exception as e:
-        return f"Error saving CSV: {e}"
+        return f"Error saving to DB: {e}"
 
 if __name__ == "__main__":
     mcp.run()
