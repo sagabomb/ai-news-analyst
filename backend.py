@@ -141,6 +141,7 @@ def verify_is_open(name: str, location: str, model_name: str) -> bool:
         return True
 
 # --- MAIN INTELLIGENCE FUNCTION ---
+# --- MAIN INTELLIGENCE FUNCTION ---
 def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidate]:
     MODEL_NAME = 'gemini-flash-latest'
     
@@ -150,20 +151,22 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
 
     t_client = TavilyClient(api_key=TAVILY_API_KEY)
     
-    # FIX 1: DYNAMIC SOURCES & WIDER AREA
+    # 1. SETUP SOURCES
     sources = get_trusted_sources()
     if not sources:
         sources = ["reddit.com", "blogto.com", "yelp.ca"]
     
-    site_operators = " OR ".join([f"site:{s}" for s in sources])
-    
-    # UPDATED QUERY: Added "area and nearby" to catch driving distance spots
-    query = f"best {food_item} in {location} area and nearby ({site_operators})"
-    
-    print(f"🔎 Searching: {query}...")
+    # 2. SEARCH (Fixed: Moved domains to 'include_domains' parameter)
+    query = f"best {food_item} in {location} area and nearby"
+    print(f"🔎 Searching: {query} (checking {len(sources)} specific sites)...")
     
     try:
-        search_result = t_client.search(query, max_results=5)
+        # We pass the list of sites strictly to 'include_domains' to avoid the 400 char limit
+        search_result = t_client.search(
+            query, 
+            max_results=5, 
+            include_domains=sources
+        )
         hits = search_result['results']
         
         # DEBUG: Print titles
@@ -175,11 +178,12 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
             return []
             
         raw_context = "\n".join([f"Source: {r['title']}\nContent: {r['content']}" for r in hits])
+        
     except Exception as e:
-        print(f"Search failed: {e}")
+        print(f"❌ Search failed: {e}")
         return []
 
-    # B. ANALYZE
+    # 3. ANALYZE (Gemini)
     print(f"🧠 Analyzing with {MODEL_NAME}...")
     try:
         model = genai.GenerativeModel(MODEL_NAME)
@@ -223,9 +227,9 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
             score = item.get('confidence_score', 0)
             name = item.get('name', 'Unknown')
             
+            # 4. VERIFY STATUS
             if score >= 5:
-                # FIX 2: RUN THE STATUS CHECK
-                # Only check if it passed the score threshold to save API calls
+                # Use the helper function to check if it's open
                 if verify_is_open(name, location, MODEL_NAME):
                     found_places.append(RestaurantCandidate(**item))
             else:
