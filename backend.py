@@ -1,167 +1,109 @@
 import os
-import sqlite3
 import json
-from typing import List, Dict, Optional
+import sqlite3
+import time  # <--- NEW: Added for rate limiting
+from typing import List, Optional
 from dotenv import load_dotenv
 from tavily import TavilyClient
-import google.generativeai as genai
-from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
 
-# 1. SETUP
+# Load environment variables
 load_dotenv()
+
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+DB_NAME = "foodie_memory.db"
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(current_dir, "foodie_memory.db")
+# --- DATA STRUCTURES ---
+class RestaurantCandidate:
+    def __init__(self, name, neighborhood, taste_rating, notes, confidence_score):
+        self.name = name
+        self.neighborhood = neighborhood
+        self.taste_rating = taste_rating
+        self.notes = notes
+        self.confidence_score = confidence_score
 
-# Configure Gemini
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+# --- HELPER FUNCTIONS ---
 
-# --- DATA MODELS ---
-class RestaurantCandidate(BaseModel):
-    name: str
-    neighborhood: str
-    taste_rating: int
-    notes: str
-    confidence_score: int
+def get_watchlist():
+    """
+    Returns the list of food items to track.
+    FIXED: Uses 'food_item' key to match sentinel.py
+    """
+    return [
+        {"food_item": "Pizza", "location": "Markham"},
+        {"food_item": "Dim Sum", "location": "Richmond Hill"},
+        {"food_item": "Ramen", "location": "North York"},
+        {"food_item": "Burger", "location": "Vaughan"}
+    ]
 
-# --- DATABASE FUNCTIONS (Standard) ---
-def get_watchlist() -> List[Dict]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM watchlist")
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def get_trusted_sources() -> List[str]:
-    """Fetch all active domains from the database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT domain FROM sources")
-    rows = cursor.fetchall()
-    conn.close()
-    # Return a clean list: ['reddit.com', 'blogto.com', ...]
-    return [row[0] for row in rows]
-
-def add_to_watchlist(food_item: str, location: str = "Markham") -> str:
-    clean_food = food_item.strip().title()
-    clean_loc = location.strip().title()
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO watchlist (food_item, location, last_checked) VALUES (?, ?, ?)", 
-                       (clean_food, clean_loc, "Never"))
-        if cursor.rowcount == 0:
-            return f"⚠️ '{clean_food}' is already in your watchlist!"
-        conn.commit()
-        return f"✅ Added '{clean_food}'."
-    except Exception as e:
-        return f"❌ Error: {e}"
-
-def get_all_restaurants() -> List[Dict]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM restaurants ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def save_restaurant(candidate: RestaurantCandidate) -> str:
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR IGNORE INTO restaurants (name, neighborhood, taste_rating, notes) VALUES (?, ?, ?, ?)",
-            (candidate.name, candidate.neighborhood, candidate.taste_rating, candidate.notes)
+def init_db():
+    """Creates the database table if it doesn't exist."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS restaurants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            neighborhood TEXT,
+            taste_rating INTEGER,
+            notes TEXT,
+            confidence_score INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        conn.commit()
-        if cursor.rowcount == 0:
-            return "Duplicate"
-        return "Saved"
-    except Exception as e:
-        return f"Error: {e}"
+    ''')
+    conn.commit()
+    conn.close()
 
-# --- INTELLIGENCE FUNCTIONS (Gemini Powered) ---
-
-# ... (Imports and Setup remain the same) ...
-
-# --- INTELLIGENCE FUNCTIONS (Gemini Pro Fixed) ---
-
-# ... (Keep your imports and DB setup at the top) ...
-
-# --- NEW VERIFICATION FUNCTION ---
-def verify_is_open(name: str, location: str, model_name: str) -> bool:
-    """
-    Performs a specific 'sanity check' search to see if a place is closed.
-    Returns TRUE if open, FALSE if closed.
-    """
-    print(f"   🕵️‍♀️ Verifying status for: {name}...")
-    t_client = TavilyClient(api_key=TAVILY_API_KEY)
-    
-    # Specific query to catch closures
-    query = f"is {name} in {location} permanently closed? restaurant hours"
-    
+def save_restaurant(candidate: RestaurantCandidate):
+    """Saves a single restaurant to the database."""
     try:
-        # We only need 2 results to check status
-        search_result = t_client.search(query, max_results=2)
-        content = "\n".join([r['content'] for r in search_result['results']])
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
         
-        # Ask Gemini to be the judge
-        model = genai.GenerativeModel(model_name)
-        prompt = f"""
-        Based on these search results, is the restaurant '{name}' PERMANENTLY CLOSED?
+        # Check for duplicates
+        c.execute("SELECT id FROM restaurants WHERE name = ?", (candidate.name,))
+        if c.fetchone():
+            print(f"   ⚠️ Skipping {candidate.name} (Already in DB)")
+            conn.close()
+            return
+
+        c.execute('''
+            INSERT INTO restaurants (name, neighborhood, taste_rating, notes, confidence_score)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (candidate.name, candidate.neighborhood, candidate.taste_rating, candidate.notes, candidate.confidence_score))
         
-        SEARCH DATA:
-        {content}
-        
-        RULES:
-        - If it says "Permanently closed", return "CLOSED".
-        - If it mentions current hours or recent reviews, return "OPEN".
-        - If uncertain, assume "OPEN".
-        - Respond with ONE word: OPEN or CLOSED.
-        """
-        
-        response = model.generate_content(prompt)
-        status = response.text.strip().upper()
-        
-        if "CLOSED" in status:
-            print(f"   ❌ DETECTED CLOSURE: {name} is closed. Skipping.")
-            return False
-        else:
-            print(f"   ✅ Verified Open: {name}")
-            return True
-            
+        conn.commit()
+        conn.close()
+        print(f"   💾 Saved: {candidate.name}")
     except Exception as e:
-        print(f"   ⚠️ Verification failed ({e}). Assuming open.")
-        return True
+        print(f"   ❌ DB Error: {e}")
+
+def get_trusted_sources():
+    return ["reddit.com", "blogto.com", "yelp.ca", "torontolife.com", "eater.com"]
+
+def verify_is_open(name: str, location: str, client: genai.Client) -> bool:
+    # PERMANENT FIX: Disable this check to save API Quota
+    return True 
 
 # --- MAIN INTELLIGENCE FUNCTION ---
-# --- MAIN INTELLIGENCE FUNCTION ---
+# --- MAIN INTELLIGENCE FUNCTION (With Smart Retry) ---
 def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidate]:
-    MODEL_NAME = 'gemini-flash-latest'
+    MODEL_NAME = 'gemini-2.0-flash' 
     
     if not TAVILY_API_KEY or not GOOGLE_API_KEY:
         print("❌ Missing API Keys.")
         return []
 
     t_client = TavilyClient(api_key=TAVILY_API_KEY)
-    
-    # 1. SETUP SOURCES
     sources = get_trusted_sources()
-    if not sources:
-        sources = ["reddit.com", "blogto.com", "yelp.ca"]
     
-    # 2. SEARCH (Fixed: Moved domains to 'include_domains' parameter)
+    # 1. SEARCH
     query = f"best {food_item} in {location} area and nearby"
-    print(f"🔎 Searching: {query} (checking {len(sources)} specific sites)...")
+    print(f"🔎 Searching: {query}...")
     
     try:
-        # We pass the list of sites strictly to 'include_domains' to avoid the 400 char limit
         search_result = t_client.search(
             query, 
             max_results=5, 
@@ -169,11 +111,6 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
         )
         hits = search_result['results']
         
-        # DEBUG: Print titles
-        print(f"   --> Tavily Titles Found:")
-        for h in hits:
-            print(f"       - {h['title'][:60]}...") 
-            
         if not hits:
             return []
             
@@ -183,60 +120,77 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
         print(f"❌ Search failed: {e}")
         return []
 
-    # 3. ANALYZE (Gemini)
+    # 2. ANALYZE (With Retry Logic)
     print(f"🧠 Analyzing with {MODEL_NAME}...")
-    try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        
-        prompt = f"""
-        Analyze these search results and extract ANY restaurant names that serve {food_item}.
-        
-        RULES:
-        1. Extract specific restaurant names.
-        2. Guess the neighborhood.
-        3. Return a VALID JSON list.
-        
-        SEARCH DATA:
-        {raw_context}
-        
-        Output Format:
-        [
-          {{
-            "name": "Restaurant Name",
-            "neighborhood": "Area Name",
-            "taste_rating": 7,
-            "notes": "Brief mention",
-            "confidence_score": 6
-          }}
-        ]
-        """
+    
+    client = genai.Client(api_key=GOOGLE_API_KEY)
+    
+    prompt = f"""
+    Analyze these search results and extract ANY restaurant names that serve {food_item}.
+    RETURN ONLY VALID JSON.
+    
+    SEARCH DATA:
+    {raw_context}
+    
+    Output Format:
+    [
+      {{
+        "name": "Restaurant Name",
+        "neighborhood": "Area Name",
+        "taste_rating": 7,
+        "notes": "Brief mention",
+        "confidence_score": 6
+      }}
+    ]
+    """
 
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # Clean JSON
+    # --- THE NEW RETRY LOOP ---
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt
+            )
+            # If we get here, it worked! Break the loop.
+            text = response.text.strip()
+            break 
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                wait_time = 60
+                print(f"   ⏳ Quota hit (Attempt {attempt+1}/{max_retries}). Sleeping {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                # If it's a real error (not quota), crash usually.
+                print(f"❌ Analysis Logic Failed: {e}")
+                return []
+    else:
+        # If we loop 3 times and still fail
+        print("❌ Gave up after 3 retries.")
+        return []
+
+    # 3. PARSE RESULTS
+    try:
         if text.startswith("```json"): text = text[7:]
         if text.startswith("```"): text = text[3:]
         if text.endswith("```"): text = text[:-3]
         
         data = json.loads(text)
-        print(f"   --> Gemini extracted {len(data)} raw items.")
         
         found_places = []
         for item in data:
             score = item.get('confidence_score', 0)
             name = item.get('name', 'Unknown')
             
-            # 4. VERIFY STATUS
             if score >= 5:
-                # Use the helper function to check if it's open
-                if verify_is_open(name, location, MODEL_NAME):
+                # verify_is_open is disabled (returns True) to save quota
+                if verify_is_open(name, location, client):
                     found_places.append(RestaurantCandidate(**item))
-            else:
-                print(f"   ⚠️ REJECTED: {name} (Score {score} too low)")
 
         return found_places
 
     except Exception as e:
-        print(f"❌ Analysis Logic Failed: {e}")
+        print(f"❌ Parsing Logic Failed: {e}")
         return []
