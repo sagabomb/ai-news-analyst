@@ -30,10 +30,9 @@ class RestaurantCandidate:
 def get_watchlist():
     """Returns the list of food items to track."""
     return [
-        {"food_item": "Pizza", "location": "Markham"},
-        {"food_item": "Dim Sum", "location": "Richmond Hill"},
-        {"food_item": "Ramen", "location": "North York"},
-        {"food_item": "Burger", "location": "Vaughan"}
+        {"food_item": "hainanese chicken rice", "location": "Markham"},
+        {"food_item": "omakase", "location": "Markham"},
+        {"food_item": "singaporean food", "location": "Markham"}
     ]
 
 def init_db():
