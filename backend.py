@@ -1,12 +1,13 @@
 import os
 import json
 import sqlite3
-import time  # <--- NEW: Added for rate limiting
+import time
 from typing import List, Optional
 from dotenv import load_dotenv
 from tavily import TavilyClient
 from google import genai
 from google.genai import types
+import datetime
 
 # Load environment variables
 load_dotenv()
@@ -24,13 +25,10 @@ class RestaurantCandidate:
         self.notes = notes
         self.confidence_score = confidence_score
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (These were missing before) ---
 
 def get_watchlist():
-    """
-    Returns the list of food items to track.
-    FIXED: Uses 'food_item' key to match sentinel.py
-    """
+    """Returns the list of food items to track."""
     return [
         {"food_item": "Pizza", "location": "Markham"},
         {"food_item": "Dim Sum", "location": "Richmond Hill"},
@@ -57,22 +55,26 @@ def init_db():
     conn.close()
 
 def save_restaurant(candidate: RestaurantCandidate):
-    """Saves a single restaurant to the database."""
+    """Saves a single restaurant to the database with LOCAL TIME."""
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         
-        # Check for duplicates
+        # Check for duplicates by name
         c.execute("SELECT id FROM restaurants WHERE name = ?", (candidate.name,))
         if c.fetchone():
             print(f"   ⚠️ Skipping {candidate.name} (Already in DB)")
             conn.close()
             return
 
+        # NEW: We calculate the local time explicitly
+        local_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # UPDATED SQL: We now insert 'created_at' manually
         c.execute('''
-            INSERT INTO restaurants (name, neighborhood, taste_rating, notes, confidence_score)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (candidate.name, candidate.neighborhood, candidate.taste_rating, candidate.notes, candidate.confidence_score))
+            INSERT INTO restaurants (name, neighborhood, taste_rating, notes, confidence_score, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (candidate.name, candidate.neighborhood, candidate.taste_rating, candidate.notes, candidate.confidence_score, local_time))
         
         conn.commit()
         conn.close()
@@ -84,11 +86,24 @@ def get_trusted_sources():
     return ["reddit.com", "blogto.com", "yelp.ca", "torontolife.com", "eater.com"]
 
 def verify_is_open(name: str, location: str, client: genai.Client) -> bool:
-    # PERMANENT FIX: Disable this check to save API Quota
-    return True 
+    """
+    Uses Gemini to strictly verify if the place is permanently closed.
+    """
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=f"Is the restaurant '{name}' in '{location}' permanently closed? Answer only YES or NO."
+        )
+        answer = response.text.strip().upper()
+        
+        if "YES" in answer:
+            print(f"   ❌ Rejected {name} (Permanently Closed)")
+            return False
+        return True
+    except:
+        return True # Default to keep if AI fails
 
 # --- MAIN INTELLIGENCE FUNCTION ---
-# --- MAIN INTELLIGENCE FUNCTION (With Smart Retry) ---
 def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidate]:
     MODEL_NAME = 'gemini-2.0-flash' 
     
@@ -120,7 +135,7 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
         print(f"❌ Search failed: {e}")
         return []
 
-    # 2. ANALYZE (With Retry Logic)
+    # 2. ANALYZE
     print(f"🧠 Analyzing with {MODEL_NAME}...")
     
     client = genai.Client(api_key=GOOGLE_API_KEY)
@@ -144,7 +159,7 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
     ]
     """
 
-    # --- THE NEW RETRY LOOP ---
+    # Retry Loop for Stability
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -152,24 +167,19 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
                 model=MODEL_NAME,
                 contents=prompt
             )
-            # If we get here, it worked! Break the loop.
             text = response.text.strip()
             break 
             
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                wait_time = 60
-                print(f"   ⏳ Quota hit (Attempt {attempt+1}/{max_retries}). Sleeping {wait_time}s...")
-                time.sleep(wait_time)
+            # If we hit a rate limit (even on paid tier), wait briefly
+            if "429" in str(e):
+                print(f"   ⏳ Network Busy (Attempt {attempt+1}), waiting 5s...")
+                time.sleep(5)
             else:
-                # If it's a real error (not quota), crash usually.
-                print(f"❌ Analysis Logic Failed: {e}")
+                print(f"   ⚠️ API Glitch (Attempt {attempt+1}): {e}")
+            
+            if attempt == max_retries - 1:
                 return []
-    else:
-        # If we loop 3 times and still fail
-        print("❌ Gave up after 3 retries.")
-        return []
 
     # 3. PARSE RESULTS
     try:
@@ -185,7 +195,6 @@ def search_and_analyze(food_item: str, location: str) -> List[RestaurantCandidat
             name = item.get('name', 'Unknown')
             
             if score >= 5:
-                # verify_is_open is disabled (returns True) to save quota
                 if verify_is_open(name, location, client):
                     found_places.append(RestaurantCandidate(**item))
 

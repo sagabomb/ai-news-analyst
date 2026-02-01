@@ -1,69 +1,80 @@
 import streamlit as st
-import backend
 import pandas as pd
+import sqlite3
+import backend  # Import your actual backend logic
 
-# 1. PAGE SETUP
-st.set_page_config(page_title="The Foodie Sentinel", page_icon="🍜", layout="wide")
-st.title("🍜 The Foodie Sentinel")
-st.markdown("Automated Research & Discovery Engine")
+# --- PAGE CONFIG ---
+st.set_page_config(
+    page_title="Foodie Sentinel V2", 
+    page_icon="🕵️‍♂️", 
+    layout="wide"
+)
 
-# --- SIDEBAR: CONTROLS ---
-with st.sidebar:
-    st.header("Add to Watchlist")
-    st.markdown("What food should the Sentinel hunt for?")
-    
-    # Input fields
-    new_food = st.text_input("Food Item", placeholder="e.g. Omakase")
-    new_loc = st.text_input("Location", value="Markham")
-    
-    # The Action Button
-    if st.button("Start Watching", type="primary"):
-        if new_food:
-            # CALL THE BACKEND
-            msg = backend.add_to_watchlist(new_food, new_loc)
-            if "✅" in msg:
-                st.success(msg)
-            else:
-                st.error(msg)
-        else:
-            st.warning("Please enter a food name.")
+st.title("🕵️‍♂️ Foodie Sentinel Command Center")
+st.caption(f"Connected to Memory Bank: `{backend.DB_NAME}`")
 
-    st.divider()
-    st.caption(f"Database: `{backend.DB_PATH}`")
+# --- TABS FOR ORGANIZATION ---
+tab1, tab2 = st.tabs(["🍽️ The Black Book (Results)", "⚙️ Mission Config (Watchlist)"])
 
-# --- MAIN PAGE: TABS ---
-tab1, tab2 = st.tabs(["📋 Watchlist Configuration", "🍽️ The Black Book"])
-
-# TAB 1: What are we looking for?
+# --- TAB 1: THE RESULTS ---
 with tab1:
-    st.subheader("Active Search Targets")
-    watchlist_data = backend.get_watchlist()
+    st.header("Recent Intelligence")
     
-    if watchlist_data:
-        df = pd.DataFrame(watchlist_data)
-        # Display as a clean interactive table
+    # 1. Load Data
+    try:
+        conn = sqlite3.connect(backend.DB_NAME)
+        # We query specifically for the columns we created
+        query = """
+            SELECT 
+                name as 'Restaurant', 
+                neighborhood as 'Location', 
+                taste_rating as 'Rating', 
+                confidence_score as 'AI Confidence',
+                notes as 'Intel',
+                created_at as 'Found'
+            FROM restaurants 
+            ORDER BY created_at DESC
+        """
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+
+        # 2. Metrics Row
+        if not df.empty:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Spots Tracked", len(df))
+            
+            avg_rating = df['Rating'].mean()
+            c2.metric("Average Rating", f"{avg_rating:.1f} / 10")
+            
+            high_conf = len(df[df['AI Confidence'] >= 8])
+            c3.metric("High Confidence Leads", high_conf)
+        else:
+            st.info("Database is empty. Run 'sentinel.py' to gather intelligence.")
+
+        # 3. Interactive Data Table
         st.dataframe(
             df, 
             use_container_width=True,
+            hide_index=True,
             column_config={
-                "last_checked": st.column_config.TextColumn("Last Scan"),
-                "food_item": "Cuisine / Dish",
-                "location": "Target Area"
+                "Rating": st.column_config.NumberColumn(format="%d ⭐"),
+                "AI Confidence": st.column_config.ProgressColumn(min_value=0, max_value=10, format="%d/10"),
+                "Found": st.column_config.DatetimeColumn(format="D MMM YYYY, h:mm a")
             }
         )
-    else:
-        st.info("Your watchlist is empty. Add your first target in the sidebar! 👈")
+        
+    except Exception as e:
+        st.error(f"Could not load database. Has sentinel.py run yet? \nError: {e}")
 
-# TAB 2: What have we found?
+# --- TAB 2: THE CONFIG ---
 with tab2:
-    st.subheader("Discovered Restaurants")
-    restaurant_data = backend.get_all_restaurants()
+    st.header("Active Surveillance Targets")
+    st.markdown("The Sentinel is currently hunting for these targets:")
     
-    if restaurant_data:
-        df_rest = pd.DataFrame(restaurant_data)
-        st.dataframe(
-            df_rest[["name", "neighborhood", "taste_rating", "notes"]], 
-            use_container_width=True
-        )
-    else:
-        st.info("No discoveries yet. The Sentinel hasn't run.")
+    # Get watchlist from the backend function we fixed earlier
+    watchlist = backend.get_watchlist()
+    
+    # Convert to DataFrame for nice display
+    st.table(pd.DataFrame(watchlist))
+    
+    st.caption("To edit these targets, modify the `get_watchlist()` function in `backend.py`.")
