@@ -1,65 +1,98 @@
 # Project 2: The Multi-Agent Shoe Tracker 👟
 
-## 1. Objective
-Build an intelligent, multi-agent system to track running shoe prices, find new retailers, and monitor deals. The system is designed to evolve from a standalone Python tool into a scalable ecosystem that integrates with OpenClaw and multiple chat platforms (Telegram, Discord, etc.).
+## 1. Executive Summary
+**Objective:** Build an autonomous, multi-agent system to track running shoe prices, discover new Canadian retailers, and monitor for specific deals (e.g., "Nike Vaporfly size 10").
+**Current State:** Stage 1 (Foundation) completed. The system can discover stores, scrape basic prices, and report via Telegram.
+**Primary User:** Allen (Markham, Ontario).
 
 ---
 
-## 2. Architecture: The Agent Swarm
-The system consists of specialized agents managed by a central Orchestrator.
+## 2. System Architecture (The "Swarm")
 
-### The Agents
-* **Agent A (The Navigator):**
-    * **Role:** The Explorer. Uses Search APIs (Google/DuckDuckGo) to discover *new* online retailers or boutique shops.
-    * **Task:** Validates if a found URL sells the target brands and adds it to the "Scout List."
-* **Agent B (The Scout):**
-    * **Role:** The Worker. Visits URLs (from the manual list + Navigator discoveries) to scrape raw data (Price, Size, Stock).
-    * **Capability:** Supports distinct parsing logic for different site structures (Shopify vs. Custom).
-* **Agent C (The Analyst):**
-    * **Role:** The Brain. Compares scraped data against:
-        1.  **Price History:** Detects fake sales vs. real drops.
-        2.  **User Personas:** Matches deals to specific User IDs based on size, brand loyalty, and category (Road vs. Trail).
-* **Agent D (The Reporter):**
-    * **Role:** The Messenger. A platform-agnostic notification manager that routes alerts to the correct user on their preferred app.
+The system operates as a hub-and-spoke model where `bot.py` is the interface and specialized scripts act as autonomous agents.
+
+| Agent / Component | File | Role & Capabilities | Status |
+| :--- | :--- | :--- | :--- |
+| **The Brain** | `foodie_memory.db` | **Central Knowledge Base.** Stores users, preferences, discovered URLs, and price history. | ✅ **Active** |
+| **The Navigator** | `navigator.py` | **Discovery Agent.** Uses Tavily API to find *new* online shoe stores in Canada. Filters for duplicates before saving to DB. | ✅ **Active** |
+| **The Scout** | `scout.py` | **Acquisition Agent.** Visits active URLs. Uses `requests` + `BeautifulSoup`. Features regex-based price extraction (`$99.99`) and brand keyword matching. | ⚠️ **v1.1 (Basic)** |
+| **The Orchestrator** | `bot.py` | **Interface.** Telegram Bot that routes natural language queries ("Find shoes", "Find food") to the correct database backend. | ✅ **Active** |
 
 ---
 
-## 3. Data Structures
-We will expand the database (`foodie_memory.db` -> `agent_memory.db`) to support multi-tenancy:
+## 3. Data Schema (SQLite)
 
-* `users`: `user_id`, `platform` (Telegram/Discord), `chat_id`.
-* `preferences`: `user_id`, `shoe_size` (e.g., 10.5), `category` (Road/Trail), `brands` (Nike, Hoka).
-* `watched_urls`: Source URLs (tagged as 'Manual' or 'Auto-Discovered').
-* `price_history`: Longitudinal data for trend analysis.
+The database (`foodie_memory.db`) contains the following schema extensions for Project 2:
 
----
+### A. Identity & Preferences
+* **`users`**: `user_id`, `telegram_id` (Auth), `username`.
+* **`preferences`**: 
+    * `user_id` (FK)
+    * `shoe_size` (float, e.g., 10.0)
+    * `category` (text, e.g., 'road', 'trail')
+    * `brands` (text, comma-separated, e.g., "nike,hoka,saucony")
 
-## 4. Implementation Stages
-
-### Stage 1: The Python Foundation (Immediate)
-* **Goal:** A working, standalone system controlled via the existing `bot.py`.
-* **Tech Stack:** Python 3.12+, SQLite, Requests/Playwright.
-* **Interface:** Telegram (Single Platform).
-* **Deliverables:**
-    1.  Database migration to support Users and Preferences.
-    2.  The "Navigator" script to find new URLs.
-    3.  The "Scout" script to scrape prices.
-    4.  `bot.py` commands: `/subscribe road size:10` and `/check_deals`.
-
-### Stage 2: Ecosystem Integration (Future)
-* **Goal:** Decouple the logic so it can be used by OpenClaw and other apps.
-* **OpenClaw Integration (MCP Bridge):**
-    * Wrap Agents A, B, and C into a **Model Context Protocol (MCP) Server**.
-    * This allows OpenClaw (and other AI clients) to "call" our tools natively (e.g., *“Hey OpenClaw, use the Shoe Scout to find me Vaporflys”*).
-* **Omni-Channel Support:**
-    * Refactor "The Reporter" to use an **Adapter Pattern**.
-    * **Adapters:**
-        * `TelegramAdapter`: (Existing) Rich text, commands.
-        * `DiscordAdapter`: Webhooks for channel alerts.
-        * `APIAdapter`: JSON output for external dashboards.
+### B. Intelligence
+* **`watched_urls`**: 
+    * `url` (Unique), `site_name`
+    * `source` (Enum: 'manual', 'navigator_agent')
+    * `status` (Default: 'active')
+* **`price_history`**:
+    * `shoe_name` (Text derived from page title/context)
+    * `price` (Real, extracted via Regex)
+    * `url`, `currency` ('CAD'), `found_at` (Timestamp)
 
 ---
 
-## 5. Technical Backlog & Risks
-* **Anti-Bot Measures:** High-value shoe sites (Nike, StockX) have heavy bot protection. We may need to use `playwright` with stealth plugins or rotate User-Agents.
-* **OpenClaw Stability:** Stage 2 depends on OpenClaw v2026 stabilizing its local skill registry.
+## 4. Current Workflows (Stage 1)
+
+### Discovery Workflow
+1.  Run `./.venv/bin/python navigator.py`.
+2.  Agent queries Tavily for "Canadian running shoe stores".
+3.  Agent filters Amazon/Pinterest results.
+4.  Valid URLs are inserted into `watched_urls`.
+
+### Scouting Workflow
+1.  Run `./.venv/bin/python scout.py`.
+2.  Agent pulls all `active` URLs.
+3.  Agent downloads HTML (User-Agent masquerading applied).
+4.  Agent checks for user-preferred brands (e.g., "Nike").
+5.  Agent attempts to regex-match price.
+6.  If Price > 0 OR "Sale" keywords found -> Log to `price_history`.
+
+### User Query Workflow
+1.  User types "Find shoes" in Telegram.
+2.  `bot.py` detects intent -> Queries `price_history` (Limit 5, sorted by recency).
+3.  Returns formatted HTML list with direct links.
+
+---
+
+## 5. Implementation Roadmap
+
+### ✅ Stage 1: The Foundation (COMPLETED)
+* [x] Database schema migration.
+* [x] Navigator Agent (Tavily integration).
+* [x] Scout Agent v1 (Basic Scraper).
+* [x] Telegram Integration (Multi-intent routing).
+
+### 🚧 Stage 2: Intelligence & Stealth (NEXT SPRINT)
+* **Objective:** Reliability and Smart Filtering.
+* **Key Tasks:**
+    1.  **Stealth Upgrade:** Replace `requests` with `playwright` or `selenium` in `scout.py` to handle JavaScript-heavy sites and bypass basic bot protection.
+    2.  **Price Logic:** Implement comparison logic (Current Price vs. 30-day Average).
+    3.  **User Binding:** Update Scout to strictly filter by `preferences` (currently it checks brands, but not sizes).
+    4.  **Cron Automation:** Create a schedule to run Navigator weekly and Scout daily.
+
+### 🔮 Stage 3: Ecosystem Expansion (FUTURE)
+* **Objective:** Decoupled accessibility.
+* **Key Tasks:**
+    1.  **MCP Server:** Wrap agents into a Model Context Protocol server for OpenClaw.
+    2.  **Omni-Channel:** Add Discord Webhook support for deal alerts.
+    3.  **Chat Configuration:** Allow users to update preferences via Telegram commands (e.g., `/size 10.5`).
+
+---
+
+## 6. Technical Debt & Known Issues
+* **Price Extraction:** Current regex approach (`$\d+`) is naive; it may capture accessory prices or shipping costs instead of the main shoe price.
+* **Scraping Blocks:** High-security sites (StockX, Nike.com) may block the current `requests`-based scraper (403 Forbidden).
+* **Hardcoded Fallbacks:** `scout.py` currently falls back to hardcoded brands if the DB query fails.
