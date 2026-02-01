@@ -1,98 +1,85 @@
-# Project 2: The Multi-Agent Shoe Tracker 👟
+# Project 2: The AI Shoe Market Intelligence System 👟
 
 ## 1. Executive Summary
-**Objective:** Build an autonomous, multi-agent system to track running shoe prices, discover new Canadian retailers, and monitor for specific deals (e.g., "Nike Vaporfly size 10").
-**Current State:** Stage 1 (Foundation) completed. The system can discover stores, scrape basic prices, and report via Telegram.
-**Primary User:** Allen (Markham, Ontario).
+**Objective:** Build an autonomous system that identifies trending high-end running shoes, aggregates reviews to generate a quality score, and tracks prices for user-selected favorites.
+**Core Pivot:** Moving from a simple "Price Tracker" to a "Discovery & Analysis Engine."
+**Interface:** A fully AI-driven Telegram bot (LLM-based) that handles natural language queries (e.g., "What are the best super shoes right now?").
 
 ---
 
-## 2. System Architecture (The "Swarm")
+## 2. System Architecture (The "Pipeline")
 
-The system operates as a hub-and-spoke model where `bot.py` is the interface and specialized scripts act as autonomous agents.
+The system operates in a linear pipeline: **Discovery → Analysis → Selection → Tracking**.
 
-| Agent / Component | File | Role & Capabilities | Status |
+| Stage | Agent / Component | Role & Capabilities | Status |
 | :--- | :--- | :--- | :--- |
-| **The Brain** | `foodie_memory.db` | **Central Knowledge Base.** Stores users, preferences, discovered URLs, and price history. | ✅ **Active** |
-| **The Navigator** | `navigator.py` | **Discovery Agent.** Uses Tavily API to find *new* online shoe stores in Canada. Filters for duplicates before saving to DB. | ✅ **Active** |
-| **The Scout** | `scout.py` | **Acquisition Agent.** Visits active URLs. Uses `requests` + `BeautifulSoup`. Features regex-based price extraction (`$99.99`) and brand keyword matching. | ⚠️ **v1.1 (Basic)** |
-| **The Orchestrator** | `bot.py` | **Interface.** Telegram Bot that routes natural language queries ("Find shoes", "Find food") to the correct database backend. | ✅ **Active** |
+| **1. Discovery** | `trend_hunter.py` | **The Cool Hunter.** Scans running blogs (RunRepeat, Runner's World), YouTube transcripts, and Reddit for new releases. | 🆕 **To Build** |
+| **2. Analysis** | `review_analyst.py` | **The Critic.** Uses Gemini AI to read scraped reviews and calculate a **"Meta-Score"** (0-100) and summarize pros/cons. | 🆕 **To Build** |
+| **3. Selection** | `bot.py` (AI Mode) | **The Concierge.** An LLM-driven interface. Reports trends to the user and asks which ones to add to the "Watch List." | 🔄 **Upgrade** |
+| **4. Tracking** | `scout.py` | **The Worker.** Periodically checks prices *only* for the shoes in the Watch List. | ⚠️ **Refactor** |
+| **Infrastructure** | `foodie_memory.db` | **Knowledge Base.** Stores Shoe Models, Review Data, and Price History. | 🔄 **Migrate** |
 
 ---
 
-## 3. Data Schema (SQLite)
+## 3. Data Schema (Expanded)
 
-The database (`foodie_memory.db`) contains the following schema extensions for Project 2:
+We need new tables to support "Shoe Concepts" separate from "Price Data."
 
-### A. Identity & Preferences
-* **`users`**: `user_id`, `telegram_id` (Auth), `username`.
-* **`preferences`**: 
-    * `user_id` (FK)
-    * `shoe_size` (float, e.g., 10.0)
-    * `category` (text, e.g., 'road', 'trail')
-    * `brands` (text, comma-separated, e.g., "nike,hoka,saucony")
+### A. Market Knowledge (New)
+* **`shoe_models`**:
+    * `model_id`, `name` (e.g., "Nike Vaporfly 3")
+    * `release_status` (Released/Upcoming)
+    * `meta_score` (Integer 0-100)
+    * `summary` (AI-generated text: "Great energy return, but narrow fit.")
+    * `last_updated` (Timestamp)
+* **`reviews`**:
+    * `review_id`, `model_id` (FK)
+    * `source` (e.g., "RunRepeat")
+    * `url`, `sentiment_score`
 
-### B. Intelligence
-* **`watched_urls`**: 
-    * `url` (Unique), `site_name`
-    * `source` (Enum: 'manual', 'navigator_agent')
-    * `status` (Default: 'active')
-* **`price_history`**:
-    * `shoe_name` (Text derived from page title/context)
-    * `price` (Real, extracted via Regex)
-    * `url`, `currency` ('CAD'), `found_at` (Timestamp)
+### B. User Tracking (Refined)
+* **`watch_list`**:
+    * `user_id`, `model_id` (FK)
+    * `target_price` (Optional)
+    * `active` (Boolean)
+* **`price_history`**: (Linked to `shoe_models` now, not just raw text)
+    * `model_id` (FK), `price`, `store_url`, `timestamp`
 
 ---
 
-## 4. Current Workflows (Stage 1)
+## 4. The AI Interaction Model (No More Hardcoded Commands)
 
-### Discovery Workflow
-1.  Run `./.venv/bin/python navigator.py`.
-2.  Agent queries Tavily for "Canadian running shoe stores".
-3.  Agent filters Amazon/Pinterest results.
-4.  Valid URLs are inserted into `watched_urls`.
+The Telegram Bot (`bot.py`) will transition from **Rule-Based** (Regex) to **Agent-Based** (LLM Tool Use).
 
-### Scouting Workflow
-1.  Run `./.venv/bin/python scout.py`.
-2.  Agent pulls all `active` URLs.
-3.  Agent downloads HTML (User-Agent masquerading applied).
-4.  Agent checks for user-preferred brands (e.g., "Nike").
-5.  Agent attempts to regex-match price.
-6.  If Price > 0 OR "Sale" keywords found -> Log to `price_history`.
-
-### User Query Workflow
-1.  User types "Find shoes" in Telegram.
-2.  `bot.py` detects intent -> Queries `price_history` (Limit 5, sorted by recency).
-3.  Returns formatted HTML list with direct links.
+### Example User Journey
+1.  **User:** *"What's the latest on marathon super shoes?"*
+2.  **Bot (AI):** Queries `shoe_models` table for recent releases with high `meta_score`.
+3.  **Bot:** *"The Alphafly 3 is trending (Score: 94) and the Adios Pro 4 just leaked. Reviewers say the Alphafly is lighter this year."*
+4.  **User:** *"Track the Alphafly for me."*
+5.  **Bot (AI):** Calls tool `add_to_watchlist(user='Allen', shoe='Alphafly 3')`.
+6.  **System:** `scout.py` begins daily price checks for Alphafly 3.
 
 ---
 
 ## 5. Implementation Roadmap
 
-### ✅ Stage 1: The Foundation (COMPLETED)
-* [x] Database schema migration.
-* [x] Navigator Agent (Tavily integration).
-* [x] Scout Agent v1 (Basic Scraper).
-* [x] Telegram Integration (Multi-intent routing).
+### Phase 1: The Knowledge Graph (Next Session)
+* **Goal:** Database migration (Create `shoe_models` table) and building the `trend_hunter.py` agent.
+* **Tech:** Tavily API (for searching "new running shoe releases 2026"), Gemini API (to parse the news into JSON).
 
-### 🚧 Stage 2: Intelligence & Stealth (NEXT SPRINT)
-* **Objective:** Reliability and Smart Filtering.
-* **Key Tasks:**
-    1.  **Stealth Upgrade:** Replace `requests` with `playwright` or `selenium` in `scout.py` to handle JavaScript-heavy sites and bypass basic bot protection.
-    2.  **Price Logic:** Implement comparison logic (Current Price vs. 30-day Average).
-    3.  **User Binding:** Update Scout to strictly filter by `preferences` (currently it checks brands, but not sizes).
-    4.  **Cron Automation:** Create a schedule to run Navigator weekly and Scout daily.
+### Phase 2: The Review Analyst
+* **Goal:** Build `review_analyst.py`.
+* **Tech:** Scrape review text -> Feed to Gemini -> Output Score (0-100).
 
-### 🔮 Stage 3: Ecosystem Expansion (FUTURE)
-* **Objective:** Decoupled accessibility.
-* **Key Tasks:**
-    1.  **MCP Server:** Wrap agents into a Model Context Protocol server for OpenClaw.
-    2.  **Omni-Channel:** Add Discord Webhook support for deal alerts.
-    3.  **Chat Configuration:** Allow users to update preferences via Telegram commands (e.g., `/size 10.5`).
+### Phase 3: The AI Bot Brain
+* **Goal:** Refactor `bot.py` to use **Function Calling** (Tools).
+* **Tech:** Google GenAI SDK. The bot will have tools like `get_trending_shoes()`, `read_reviews()`, and `track_shoe()`.
+
+### Phase 4: The Price Scout (Re-Integration)
+* **Goal:** Update `scout.py` to search specifically for the *exact models* in the `watch_list`, rather than generic brand scraping.
 
 ---
 
-## 6. Technical Debt & Known Issues
-* **Price Extraction:** Current regex approach (`$\d+`) is naive; it may capture accessory prices or shipping costs instead of the main shoe price.
-* **Scraping Blocks:** High-security sites (StockX, Nike.com) may block the current `requests`-based scraper (403 Forbidden).
-* **Hardcoded Fallbacks:** `scout.py` currently falls back to hardcoded brands if the DB query fails.
+## 6. Technical Risks
+* **Data Freshness:** Trends move fast. We need a reliable source for "new releases" (potentially RSS feeds from sneaker blogs).
+* **Shoe Matching:** "Nike Vaporfly 3" vs "Vaporfly Next% 3" vs "ZoomX Vaporfly 3". We will need the AI to normalize names so we don't create duplicates.
